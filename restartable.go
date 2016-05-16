@@ -1,44 +1,152 @@
-package main
+package restartable
+
 
 import (
-  "log"
-  "html"
-  "net/http"
-  "os"
-  "github.com/kavu/go_reuseport"
-  "github.com/mailgun/manners"
-  "flag"
-  "fmt"
+	"net/http"
+	"net"
+	"log"
+	"github.com/kavu/go_reuseport"
+	"github.com/mailgun/manners"
+	"golang.org/x/exp/inotify"
+	"time"
+	"regexp"
+	"fmt"
+	"os/exec"
+	"runtime"
+	"os"
 )
 
-var addr = flag.String("l",":8881","addr")
-func main() {
-        log.Printf("Start Listening v2 %s",*addr)
+var BuildCMD = []string{"go","test","./..."}
+var TestCMD  = []string{"go","test","./..."}
 
-        listener, err := reuseport.NewReusablePortListener("tcp4", *addr)
-        if err != nil {
-                panic(err)
-        }
-        defer listener.Close()
-        
-        server := manners.NewServer()
+func logError(err error,v ...interface{}) {
+	a := make([]interface{},0,len(v)+1)
+	a = append(a,err)
+	a = append(a,v...)
+	log.Println(fmt.Sprintf("[ERROR] error=%s msg=" ,a...))
+}
 
-        handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-                switch (r.URL.Path ) {
-                case "/close" :
-                        log.Println("GONADIE")
-                        server.Close()
-                default:
-                        log.Println(os.Getgid())
-                        fmt.Fprintf(w, "Hello, %s\n", html.EscapeString(r.URL.Path))
-                }
-        })
+func doReload() {
+	log.Println("doReload",os.Args)
 
-        server.Handler = handler
+	if len(BuildCMD) != 0 {
+		cmd := exec.Command(os.Args[0],os.Args[1:]...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
 
-        //oldListener, _ := net.Listen("tcp", ":8882")
+		err := cmd.Run()
+		if err != nil {
+			logError(err,"Build Failed")
+			return
+		}
 
-        //server.ListenAndServe()
-        server.Serve(manners.NewListener(listener))
+	}
 
+	cmd := exec.Command(os.Args[0],os.Args[1:]...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	err := cmd.Run()
+	if err != nil {
+		logError(err,"Restart CMD")
+	}
+
+	log.Println("restarted",err)
+	//fmt.Fprintf(conn, "GET /close HTTP/1.0\r\n\r\n")
+	//conn.Close()
+}
+
+func reloadWatcher(addr string,ch <-chan int ) chan int {
+	sleepCh := make(chan int,0)
+	pending := 0
+
+	for {
+		select {
+		case _ = <-ch:
+			pending+=1
+			go func() {
+				time.Sleep(1 * time.Second)
+				sleepCh <- 1
+			}()
+		case _ = <-sleepCh:
+			pending -= 1
+			if pending == 0 {
+				doReload()
+			}
+		}
+	}
+
+}
+
+var testPatterns = []*regexp.Regexp {
+	regexp.MustCompile(`.*\.go`),
+}
+
+func passTest(name string) bool {
+	for _,p := range testPatterns {
+		if p.MatchString(name) {
+			return true
+		}
+	}
+	return false
+}
+
+func filesWatcher(dir string,ctrlCh chan int) {
+	watcher, err := inotify.NewWatcher()
+	if err != nil {
+		log.Fatal(err)
+	}
+	err = watcher.Watch(dir)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for {
+		select {
+		case ev := <-watcher.Event:
+			log.Println(ev,ev.Name,passTest(ev.Name))
+			if ( ev.Mask & (inotify.IN_OPEN | inotify.IN_CLOSE_NOWRITE) == 0 ) {
+				if passTest(ev.Name) {
+					ctrlCh <- 1
+				}
+			}
+		case err := <-watcher.Error:
+			log.Printf("error:%s", err)
+		}
+	}
+}
+
+func ListenAndServe(addr string,handler http.Handler,) error {
+
+	resetOldConn,  _ := net.Dial("tcp", addr)
+
+	listener, err := reuseport.NewReusablePortListener("tcp4", addr)
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+
+	if resetOldConn != nil {
+		fmt.Fprintf(resetOldConn, "GET /close HTTP/1.0\r\n\r\n")
+		resetOldConn.Close()
+	}
+
+	server := manners.NewServer()
+
+	server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch (r.URL.Path ) {
+		case "/close" :
+			server.Close()
+		default:
+			handler.ServeHTTP(w,r)
+		}
+	})
+
+	reloadCh  := make(chan int,0)
+
+	go reloadWatcher(addr,reloadCh )
+	go filesWatcher("./",reloadCh )
+
+	runtime.Caller(1)
+
+	return server.Serve(manners.NewListener(listener))
 }
