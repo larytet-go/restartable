@@ -20,8 +20,8 @@ import (
 import "C"
 
 
-var BuildCMD = []string{"go","test","./..."}
-var TestCMD  = []string{"go","test","./..."}
+var BuildCMD = []string{"go","build","./main/run.go"}
+var TestCMD  = []string{}
 
 func logError(err error,v ...interface{}) {
 	a := make([]interface{},0,len(v)+1)
@@ -39,8 +39,20 @@ func logDebug(ptrn string,v ...interface{}) {
 func doReload() {
 	log.Println("doReload",os.Args)
 
+	if len(TestCMD) != 0 {
+		cmd := exec.Command(TestCMD[0],TestCMD[1:]...)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+
+		err := cmd.Run()
+		if err != nil {
+			logError(err,"Test Failed")
+			return
+		}
+
+	}
 	if len(BuildCMD) != 0 {
-		cmd := exec.Command(os.Args[0],os.Args[1:]...)
+		cmd := exec.Command(BuildCMD[0],BuildCMD[1:]...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 
