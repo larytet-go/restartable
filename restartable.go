@@ -23,6 +23,9 @@ import "C"
 var BuildCMD = []string{"go","build","./main/run.go"}
 var TestCMD  = []string{}
 
+var restarting = false
+var restatrted = false
+
 func logError(err error,v ...interface{}) {
 	a := make([]interface{},0,len(v)+1)
 	a = append(a,fmt.Sprintf("[ERROR] error=%s msg=",err.Error()))
@@ -36,7 +39,7 @@ func logDebug(ptrn string,v ...interface{}) {
 }
 
 
-func doReload() {
+func doReload(restartCh chan int) {
 	log.Println("doReload",os.Args)
 
 	if len(TestCMD) != 0 {
@@ -47,6 +50,7 @@ func doReload() {
 		err := cmd.Run()
 		if err != nil {
 			logError(err,"Test Failed")
+			restartCh <- -1
 			return
 		}
 
@@ -59,7 +63,7 @@ func doReload() {
 		err := cmd.Run()
 		if err != nil {
 			logError(err,"Build Failed")
-			return
+			restartCh <- -1
 		}
 
 	}
@@ -71,29 +75,50 @@ func doReload() {
 	err := cmd.Run()
 	if err != nil {
 		logError(err,"Restart CMD")
+		restartCh <- -1
 	}
 
-	log.Println("restarted",err)
-	//fmt.Fprintf(conn, "GET /close HTTP/1.0\r\n\r\n")
-	//conn.Close()
+	log.Println("restarted")
+
+	restartCh <- 0
 }
 
-func reloadWatcher(addr string,ch <-chan int ) chan int {
+func reloadWatcher(addr string,ch <-chan int ) {
 	sleepCh := make(chan int,0)
+	restartCh := make(chan int,0)
 	pending := 0
-
+	restarting := false
+	//restarted  := false
+	defered    := false
 	for {
 		select {
 		case _ = <-ch:
-			pending+=1
-			go func() {
-				time.Sleep(1 * time.Second)
-				sleepCh <- 1
-			}()
+			if ! restarting {
+				pending+=1
+				go func() {
+					time.Sleep(1 * time.Second)
+					sleepCh <- 1
+				}()
+			} else {
+				defered = true
+			}
+		case ret := <-restartCh:
+			restarting = false
+			if ret < 0 { // Failed
+				if defered {
+					defered = false
+					pending+=1
+					sleepCh <- 1
+				}
+			} else {	   // OK
+				//restarted = true
+				return
+			}
 		case _ = <-sleepCh:
 			pending -= 1
-			if pending == 0 {
-				doReload()
+			if pending == 0 && ! restarting /*&& ! restarted */{
+				restarting = true
+				go doReload(restartCh)
 			}
 		}
 	}
