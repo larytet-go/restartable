@@ -12,17 +12,21 @@ import (
 	"fmt"
 	"os/exec"
 	"os"
+	"strings"
 	"debug/elf"
 	"unsafe"
+	"io/ioutil"
 	"errors"
 )
 
 import "C"
 
 
-var BuildCMD = []string{"go","build","./main/run.go"}
-var TestCMD  = []string{}
+var BuildCMD = os.Getenv("REGOBUILD") //[]string{"go","build","./main/run.go"}
+var TestCMD  = os.Getenv("REGOTEST") 
+var TempDIR  = os.TempDir()
 
+//var BuildCMDRe = regexp.MustCompile("-o [^ ]")
 var restarting = false
 var restatrted = false
 
@@ -39,11 +43,20 @@ func logDebug(ptrn string,v ...interface{}) {
 }
 
 
+func mkBuildCmd(buildCMD,tmpBin string) string {
+	ss := strings.Split(buildCMD," ")
+	if len(buildCMD) <= 2 {
+		return buildCMD + " -o " + tmpBin
+	} else {
+		return strings.Join(ss[:len(ss)-1]," ") + " -o " + tmpBin + " " + ss[len(ss)-1]
+	}
+}
+
 func doReload(restartCh chan int) {
 	log.Println("doReload",os.Args)
 
 	if len(TestCMD) != 0 {
-		cmd := exec.Command(TestCMD[0],TestCMD[1:]...)
+		cmd := exec.Command("/bin/sh","-c",TestCMD)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 
@@ -56,21 +69,45 @@ func doReload(restartCh chan int) {
 
 	}
 	if len(BuildCMD) != 0 {
-		cmd := exec.Command(BuildCMD[0],BuildCMD[1:]...)
+		tmpBin, err := ioutil.TempFile(TempDIR, "rego")
+		if err != nil {
+			logError(err,"Can not create tmp bin")
+			restartCh <- -1
+			return
+		}
+		tmpBin.Close()
+		fullCmd := mkBuildCmd(BuildCMD,tmpBin.Name())
+		logDebug("Run BUILD : /bin/sh -c '%s' ",fullCmd)
+		cmd := exec.Command("/bin/sh","-c",fullCmd)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
-
-		err := cmd.Run()
+		err = cmd.Run()
 		if err != nil {
 			logError(err,"Build Failed")
 			restartCh <- -1
+			return
 		}
 
+		cmd = exec.Command("/bin/sh","-c","mv " + tmpBin.Name() + " " + os.Args[0])
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		err = cmd.Run()
+		
+
+		if err != nil {
+			logError(err,"MV Failed")
+			restartCh <- -1
+			return
+		}
+
+	} else {
+		logDebug("NO ENV: REGOBUILD")
 	}
 
 	cmd := exec.Command(os.Args[0],os.Args[1:]...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+
 
 	err := cmd.Run()
 	if err != nil {
@@ -327,7 +364,7 @@ func ListenAndServe(addr string,handler http.Handler) error {
 		return errors.New("noaffectedFiles")
 	}
 
-	log.Printf("Start Listening on '%s'. Tracking %d files.",addr,len(affectedFiles) )
+	log.Printf("Start Listening v:3 on '%s'. Tracking %d files.",addr,len(affectedFiles) )
 
 	resetOldConn,  _ := net.Dial("tcp", addr)
 
@@ -358,5 +395,8 @@ func ListenAndServe(addr string,handler http.Handler) error {
 	go reloadWatcher(addr,reloadCh )
 	go filesWatcher(affectedFiles,reloadCh )
 
-	return server.Serve(manners.NewListener(listener))
+	err = server.Serve(manners.NewListener(listener))
+
+	logDebug("Finished")
+	return err
 }
