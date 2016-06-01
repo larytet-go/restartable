@@ -8,7 +8,7 @@ Silently restartable server that listens to changes on it's own sources.
 
 3 ) If tests successfully passed. Starts a new copy of itself and does not serve a new connection , after serving the last active connection exists.
 
-Uaage: 
+Usage: 
 ```
 export REGOBUILD="cd /mnt/GOROOT/src/github.com/martende/restartable && go build main/run.go"
   
